@@ -1,4 +1,4 @@
-"""Helper functions for loading dataset"""
+"""数据处理工具模块 - 提供数据加载和图构建的辅助函数"""
 import scipy.sparse as sp
 import numpy as np
 from collections import defaultdict
@@ -7,7 +7,19 @@ import torch
 
 
 def load_rating_file_to_list(filename):
-    """Return **List** format user/group-item interactions"""
+    """
+    将评分文件加载为列表格式
+    
+    Args:
+        filename (str): 评分文件路径，每行格式为 "用户ID 物品ID"
+        
+    Returns:
+        list: 包含[用户ID, 物品ID]对的列表
+        
+    Example:
+        >>> ratings = load_rating_file_to_list("userRatingTrain.txt")
+        >>> print(ratings[:3])  # [[0, 5], [0, 10], [1, 3]]
+    """
     rating_list = []
     lines = open(filename, 'r').readlines()
 
@@ -19,7 +31,22 @@ def load_rating_file_to_list(filename):
 
 
 def load_rating_file_to_matrix(filename, num_users=None, num_items=None):
-    """Return **Matrix** format user/group-item interactions"""
+    """
+    将评分文件加载为稀疏矩阵格式
+    
+    Args:
+        filename (str): 评分文件路径
+        num_users (int, optional): 用户数量，如果为None则自动计算
+        num_items (int, optional): 物品数量，如果为None则自动计算
+        
+    Returns:
+        scipy.sparse.dok_matrix: 用户-物品交互稀疏矩阵，1表示有交互，0表示无交互
+        
+    Note:
+        支持两种文件格式:
+        1. "用户ID 物品ID" (隐式反馈)
+        2. "用户ID 物品ID 评分" (显式反馈，评分>0才记录为交互)
+    """
     if num_users is None:
         num_users, num_items = 0, 0
 
@@ -36,7 +63,7 @@ def load_rating_file_to_matrix(filename, num_users=None, num_items=None):
         if len(contents) > 2:
             u, i, rating = int(contents[0]), int(contents[1]), int(contents[2])
             if rating > 0:
-                mat[u, i] = 1.0
+                mat[u, i] = rating
         else:
             u, i = int(contents[0]), int(contents[1])
             mat[u, i] = 1.0
@@ -44,7 +71,19 @@ def load_rating_file_to_matrix(filename, num_users=None, num_items=None):
 
 
 def load_negative_file(filename):
-    """Return **List** format negative files"""
+    """
+    加载负样本文件
+    
+    Args:
+        filename (str): 负样本文件路径，每行格式为 "(用户ID,正样本ID) 负样本ID1 负样本ID2 ..."
+        
+    Returns:
+        list: 每个元素是一个负样本ID列表，对应每个测试样本的负样本
+        
+    Example:
+        文件内容: "(0,5) 1 3 7 9"
+        返回: [[1, 3, 7, 9], ...]
+    """
     negative_list = []
 
     lines = open(filename, 'r').readlines()
@@ -57,7 +96,19 @@ def load_negative_file(filename):
 
 
 def load_group_member_to_dict(user_in_group_path):
-    """Return **Dict** format group-to-member-list mapping"""
+    """
+    加载群组成员映射关系
+    
+    Args:
+        user_in_group_path (str): 群组成员文件路径，每行格式为 "群组ID 成员ID1,成员ID2,..."
+        
+    Returns:
+        defaultdict(list): 群组ID到成员ID列表的映射字典
+        
+    Example:
+        文件内容: "0 1,3,5"
+        返回: {0: [1, 3, 5], 1: [...], ...}
+    """
     group_member_dict = defaultdict(list)
     lines = open(user_in_group_path, 'r').readlines()
 
@@ -70,7 +121,21 @@ def load_group_member_to_dict(user_in_group_path):
 
 
 def build_group_graph(group_data, num_groups):
-    """Return group-level graph (**a weighted graph** with weights defined as ratio of common members and items)"""
+    """
+    构建群组级别的重叠图
+    
+    Args:
+        group_data (list): 每个群组包含的节点(用户+物品)列表
+        num_groups (int): 群组总数
+        
+    Returns:
+        numpy.ndarray: 归一化的群组邻接矩阵 D^(-1) * A
+        
+    Note:
+        权重计算公式: weight = |交集| / |并集| (Jaccard相似度)
+        对角线元素为1.0(自连接)
+        最终返回度归一化后的邻接矩阵
+    """
     matrix = np.zeros((num_groups, num_groups))
 
     for i in range(num_groups):
@@ -90,7 +155,28 @@ def build_group_graph(group_data, num_groups):
 
 
 def build_hyper_graph(group_member_dict, group_train_path, num_users, num_items, num_groups, group_item_dict=None):
-    """Return member-level hyper-graph"""
+    """
+    构建成员级别的超图结构
+    
+    Args:
+        group_member_dict (dict): 群组到成员的映射
+        group_train_path (str): 群组训练数据文件路径
+        num_users (int): 用户总数
+        num_items (int): 物品总数  
+        num_groups (int): 群组总数
+        group_item_dict (dict, optional): 群组到物品的映射，如果为None则从文件构建
+        
+    Returns:
+        tuple: (用户超图, 物品超图, 完整超图, 群组数据)
+            - 用户超图: 用户通过群组超边连接的归一化超图
+            - 物品超图: 物品通过群组超边连接的归一化超图  
+            - 完整超图: 用户和物品统一的超图结构
+            - 群组数据: 每个群组包含的所有节点列表
+            
+    Note:
+        超图中每个群组都是一个超边，连接该群组中的所有用户和物品
+        返回的超图已经过度归一化处理，可直接用于超图卷积计算
+    """
     # Construct group-to-item-list mapping
     if group_item_dict is None:
         group_item_dict = defaultdict(list)
@@ -106,12 +192,35 @@ def build_hyper_graph(group_member_dict, group_train_path, num_users, num_items,
                 group_item_dict[group].append(item)
 
     def _prepare(group_dict, rows, axis=0):
+        """
+        构建超图的内部辅助函数
+        
+        Args:
+            group_dict (dict): 群组到节点的映射
+            rows (int): 节点总数
+            axis (int): 求和轴，0表示按群组求和，1表示按节点求和
+            
+        Returns:
+            tuple: (超图邻接矩阵, 度归一化矩阵)
+        """
         nodes, groups = [], []
 
         for group_id in range(num_groups):
-            groups.extend([group_id] * len(group_dict[group_id]))
-            nodes.extend(group_dict[group_id])
+            # groups.extend([group_id] * len(group_dict[group_id]))
+            # nodes.extend(group_dict[group_id])
+            # 过滤超出范围的节点ID
+            valid_nodes = [node for node in group_dict[group_id] if node < rows]
+            groups.extend([group_id] * len(valid_nodes))
+            nodes.extend(valid_nodes)
 
+        # csr_matrix构建超图邻接矩阵
+        # 示例：
+        #        群组0  群组1  群组2
+        # 用户10   1     0     0      # 用户10只属于群组0
+        # 用户20   1     1     0      # 用户20属于群组0和群组1
+        # 用户30   1     0     1      # 用户30属于群组0和群组2  
+        # 用户40   0     1     1      # 用户40属于群组1和群组2
+        # 用户50   0     0     1      # 用户50只属于群组2
         hyper_graph = csr_matrix((np.ones(len(nodes)), (nodes, groups)), shape=(rows, num_groups))
         hyper_deg = np.array(hyper_graph.sum(axis=axis)).squeeze()
         hyper_deg[hyper_deg == 0.] = 1
@@ -139,7 +248,18 @@ def build_hyper_graph(group_member_dict, group_train_path, num_users, num_items,
 
 
 def convert_sp_mat_to_sp_tensor(x):
-    """Convert `csr_matrix` into `torch.SparseTensor` format"""
+    """
+    将scipy稀疏矩阵转换为PyTorch稀疏张量
+    
+    Args:
+        x (scipy.sparse matrix): 输入的scipy稀疏矩阵
+        
+    Returns:
+        torch.sparse.FloatTensor: 转换后的PyTorch稀疏张量
+        
+    Note:
+        通过COO格式进行转换，保持稀疏性以节省内存
+    """
     coo = x.tocoo().astype(np.float32)
     row = torch.Tensor(coo.row).long()
     col = torch.Tensor(coo.col).long()
@@ -149,7 +269,23 @@ def convert_sp_mat_to_sp_tensor(x):
 
 
 def build_light_gcn_graph(group_item_net, num_groups, num_items):
-    """Return item-level graph (**a group-item bipartite graph**)"""
+    """
+    构建物品级别的二分图 (用于LightGCN)
+    
+    Args:
+        group_item_net (scipy.sparse matrix): 群组-物品交互矩阵
+        num_groups (int): 群组总数
+        num_items (int): 物品总数
+        
+    Returns:
+        torch.sparse.FloatTensor: 归一化的群组-物品二分图邻接矩阵
+        
+    Note:
+        构建形式: [   0    R  ]
+                [  R^T   0  ]
+        其中R是群组-物品交互矩阵
+        使用对称归一化: D^(-1/2) * A * D^(-1/2)
+    """
     adj_mat = sp.dok_matrix((num_groups + num_items, num_groups + num_items), dtype=np.float32)
     adj_mat = adj_mat.tolil()
 
